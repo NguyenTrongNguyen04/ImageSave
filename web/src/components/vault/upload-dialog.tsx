@@ -1,14 +1,15 @@
 "use client";
 
 import * as React from "react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   CheckCircle2,
   CircleAlert,
   RotateCcw,
-  FileVideo,
-  Image as ImageIcon,
-  Loader2,
+  Trash2,
   UploadCloud,
+  FileVideo,
+  ImageIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,14 +17,10 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
   apiFetch,
@@ -39,27 +36,52 @@ import {
   IMAGEKIT_URL_ENDPOINT,
 } from "@/lib/constants";
 
-type QueueItem = {
+/* ------------------------------------------------------------------ */
+/* Types                                                                 */
+/* ------------------------------------------------------------------ */
+
+type FileKind = "image" | "video" | "file";
+type FileStatus = "queued" | "uploading" | "syncing" | "done" | "error";
+
+interface QueueItem {
   id: string;
   file: File;
-  kind: "image" | "video" | "file";
-  status: "queued" | "uploading" | "syncing" | "done" | "error";
+  kind: FileKind;
+  preview?: string;
+  status: FileStatus;
   progress: number;
   error?: string;
-};
+}
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                               */
+/* ------------------------------------------------------------------ */
 
 function uid() {
   return crypto.randomUUID();
 }
 
-async function uploadToVaultNetwork(params: {
+function inferKind(file: File): FileKind {
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("video/")) return "video";
+  return "file";
+}
+
+function readableSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+async function uploadToImageKit(params: {
   file: File;
   auth: UploadAuthResponse;
   onProgress: (pct: number) => void;
 }): Promise<VaultUploadResponse> {
   if (!IMAGEKIT_PUBLIC_KEY || !IMAGEKIT_URL_ENDPOINT) {
     throw new Error(
-      "Thiếu cấu hình Mạng Kho. Vui lòng đặt NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY và NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT trong web/.env.local.",
+      "Thiếu cấu hình ImageKit. Vui lòng kiểm tra biến môi trường.",
     );
   }
 
@@ -71,39 +93,244 @@ async function uploadToVaultNetwork(params: {
   form.append("expire", String(params.auth.expire));
   form.append("signature", params.auth.signature);
 
-  // Use XHR for upload progress.
-  const xhr = new XMLHttpRequest();
-  const promise = new Promise<VaultUploadResponse>((resolve, reject) => {
+  return new Promise<VaultUploadResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
     xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const pct = Math.round((e.loaded / e.total) * 100);
-      params.onProgress(Math.min(99, Math.max(1, pct)));
+      if (e.lengthComputable) {
+        params.onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+      }
     };
     xhr.onerror = () => reject(new Error("Lỗi mạng khi tải lên"));
     xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as VaultUploadResponse);
+        } catch {
+          reject(new Error("Phản hồi không hợp lệ từ máy chủ"));
+        }
+      } else {
         reject(new Error(`Tải lên thất bại (${xhr.status})`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(xhr.responseText) as VaultUploadResponse);
-      } catch {
-        reject(new Error("Tải lên thất bại (phản hồi không hợp lệ)"));
       }
     };
+    xhr.open("POST", "https://upload.imagekit.io/api/v1/files/upload");
+    xhr.send(form);
   });
-
-  xhr.open("POST", "https://upload.imagekit.io/api/v1/files/upload");
-  xhr.send(form);
-  return promise;
 }
 
-function inferFileType(file: File): "image" | "video" | "file" {
-  const t = file.type || "";
-  if (t.startsWith("image/")) return "image";
-  if (t.startsWith("video/")) return "video";
-  return "file";
+/* ------------------------------------------------------------------ */
+/* Sub-components                                                        */
+/* ------------------------------------------------------------------ */
+
+function DropZone({
+  onFiles,
+  disabled,
+}: {
+  onFiles: (files: File[]) => void;
+  disabled?: boolean;
+}) {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = React.useState(false);
+
+  function handleDrag(e: React.DragEvent, over: boolean) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!disabled) setDragging(over);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(false);
+    if (disabled) return;
+    const files = Array.from(e.dataTransfer.files).filter(
+      (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+    );
+    if (files.length > 0) onFiles(files);
+  }
+
+  function handleInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length > 0) onFiles(files);
+    e.currentTarget.value = "";
+  }
+
+  return (
+    <div
+      onDragOver={(e) => handleDrag(e, true)}
+      onDragEnter={(e) => handleDrag(e, true)}
+      onDragLeave={(e) => handleDrag(e, false)}
+      onDragEnd={(e) => handleDrag(e, false)}
+      onDrop={handleDrop}
+      onClick={() => !disabled && inputRef.current?.click()}
+      className={[
+        "relative flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-all duration-150 select-none",
+        dragging
+          ? "border-primary bg-primary/5 scale-[1.01]"
+          : "border-border hover:border-primary/50 hover:bg-muted/40",
+        disabled && "pointer-events-none opacity-50",
+      ].join(" ")}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept="image/*,video/*"
+        className="sr-only"
+        disabled={disabled}
+        onChange={handleInput}
+      />
+
+      <motion.div
+        animate={dragging ? { scale: 1.15, rotate: -4 } : { scale: 1, rotate: 0 }}
+        transition={{ type: "spring", stiffness: 400, damping: 20 }}
+        className="flex size-14 items-center justify-center rounded-2xl bg-muted text-muted-foreground shadow-sm"
+      >
+        <UploadCloud className="size-7" aria-hidden />
+      </motion.div>
+
+      <div>
+        <p className="text-sm font-semibold text-foreground">
+          <span className="text-primary">Nhấn để chọn</span> hoặc kéo thả vào đây
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Hỗ trợ ảnh và video · Không giới hạn số lượng
+        </p>
+      </div>
+    </div>
+  );
 }
+
+function FileRow({
+  item,
+  onDelete,
+  onRetry,
+}: {
+  item: QueueItem;
+  onDelete: () => void;
+  onRetry: () => void;
+}) {
+  const statusLabel: Record<FileStatus, string> = {
+    queued: "Đang chờ",
+    uploading: "Đang tải lên",
+    syncing: "Đang đồng bộ",
+    done: "Hoàn tất",
+    error: "Thất bại",
+  };
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ duration: 0.18 }}
+      className={[
+        "relative overflow-hidden rounded-xl border p-3 transition-colors",
+        item.status === "error" ? "border-destructive/40 bg-destructive/5" : "bg-card",
+      ].join(" ")}
+    >
+      {/* Progress fill background */}
+      {(item.status === "uploading" || item.status === "syncing") && (
+        <motion.div
+          className="absolute inset-0 bg-primary/5"
+          initial={{ scaleX: 0 }}
+          animate={{ scaleX: item.progress / 100 }}
+          style={{ originX: 0 }}
+          transition={{ duration: 0.2 }}
+        />
+      )}
+
+      <div className="relative flex items-center gap-3">
+        {/* Thumbnail or icon */}
+        <div className="size-10 shrink-0 overflow-hidden rounded-lg bg-muted">
+          {item.preview ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={item.preview}
+              alt={item.file.name}
+              className="size-full object-cover"
+            />
+          ) : item.kind === "video" ? (
+            <div className="flex size-full items-center justify-center">
+              <FileVideo className="size-5 text-muted-foreground" aria-hidden />
+            </div>
+          ) : (
+            <div className="flex size-full items-center justify-center">
+              <ImageIcon className="size-5 text-muted-foreground" aria-hidden />
+            </div>
+          )}
+        </div>
+
+        {/* Info */}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{item.file.name}</p>
+          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{readableSize(item.file.size)}</span>
+            <span>·</span>
+            <span
+              className={
+                item.status === "done"
+                  ? "text-green-600 dark:text-green-400 font-medium"
+                  : item.status === "error"
+                    ? "text-destructive font-medium"
+                    : ""
+              }
+            >
+              {statusLabel[item.status]}
+              {(item.status === "uploading") &&
+                item.progress > 0 &&
+                ` ${item.progress}%`}
+            </span>
+          </div>
+
+          {/* Progress bar */}
+          {(item.status === "uploading" || item.status === "syncing" || item.status === "done") && (
+            <div className="mt-1.5">
+              <Progress value={item.progress} className="h-1" />
+            </div>
+          )}
+
+          {/* Error message */}
+          {item.status === "error" && item.error && (
+            <p className="mt-1 truncate text-xs text-destructive">{item.error}</p>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {item.status === "done" && (
+            <CheckCircle2 className="size-5 text-green-600 dark:text-green-400" aria-hidden />
+          )}
+          {item.status === "error" && (
+            <>
+              <CircleAlert className="size-4 text-destructive" aria-hidden />
+              <button
+                onClick={onRetry}
+                className="flex size-7 items-center justify-center rounded-full bg-muted hover:bg-muted/80 transition-colors"
+                aria-label="Thử lại"
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+              </button>
+            </>
+          )}
+          {(item.status === "queued" || item.status === "error") && (
+            <button
+              onClick={onDelete}
+              className="flex size-7 items-center justify-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+              aria-label="Xoá"
+            >
+              <Trash2 className="size-3.5" aria-hidden />
+            </button>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Main component                                                        */
+/* ------------------------------------------------------------------ */
 
 export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
   const [open, setOpen] = React.useState(false);
@@ -112,20 +339,35 @@ export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
 
   React.useEffect(() => {
     if (!open) {
+      queue.forEach((q) => q.preview && URL.revokeObjectURL(q.preview));
       setQueue([]);
       setBusy(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   function addFiles(files: File[]) {
-    const next = files.map<QueueItem>((f) => ({
+    const items = files.map<QueueItem>((f) => ({
       id: uid(),
       file: f,
-      kind: inferFileType(f),
+      kind: inferKind(f),
+      preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
       status: "queued",
       progress: 0,
     }));
-    setQueue((prev) => [...next, ...prev]);
+    setQueue((prev) => [...prev, ...items]);
+  }
+
+  function removeItem(id: string) {
+    setQueue((prev) => {
+      const item = prev.find((q) => q.id === id);
+      if (item?.preview) URL.revokeObjectURL(item.preview);
+      return prev.filter((q) => q.id !== id);
+    });
+  }
+
+  function updateItem(id: string, patch: Partial<QueueItem>) {
+    setQueue((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
   }
 
   async function processOne(itemId: string) {
@@ -134,41 +376,31 @@ export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
       toast.error("Vui lòng đăng nhập trước");
       return;
     }
+
+    const current = queue.find((q) => q.id === itemId);
+    if (!current) return;
+
     try {
-      setQueue((prev) =>
-        prev.map((q) =>
-          q.id === itemId
-            ? { ...q, status: "uploading", progress: 3, error: undefined }
-            : q,
-        ),
-      );
+      updateItem(itemId, { status: "uploading", progress: 3, error: undefined });
+
       const auth = await apiFetch<UploadAuthResponse>(
         `${API_BASE_URL}/api/media/upload-auth`,
         { method: "GET", token },
       );
 
-      const current = queue.find((q) => q.id === itemId);
-      if (!current) return;
-
-      const uploaded = await uploadToVaultNetwork({
+      const uploaded = await uploadToImageKit({
         file: current.file,
         auth,
-        onProgress: (pct) =>
-          setQueue((prev) =>
-            prev.map((q) => (q.id === itemId ? { ...q, progress: pct } : q)),
-          ),
+        onProgress: (pct) => updateItem(itemId, { progress: pct }),
       });
 
-      setQueue((prev) =>
-        prev.map((q) => (q.id === itemId ? { ...q, status: "syncing", progress: 99 } : q)),
-      );
+      updateItem(itemId, { status: "syncing", progress: 99 });
 
-      // Step 3: sync metadata to local DB for gallery
       const payload: MediaSyncRequest = {
         imagekit_file_id: uploaded.fileId,
         url: uploaded.url,
         file_name: uploaded.name,
-        file_type: inferFileType(current.file),
+        file_type: inferKind(current.file),
         size_bytes: uploaded.size,
       };
       await apiFetch<MediaCreateResponse>(`${API_BASE_URL}/api/media/sync`, {
@@ -177,41 +409,35 @@ export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
         body: JSON.stringify(payload),
       });
 
-      setQueue((prev) =>
-        prev.map((q) => (q.id === itemId ? { ...q, status: "done", progress: 100 } : q)),
-      );
+      updateItem(itemId, { status: "done", progress: 100 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Tải lên thất bại";
-      setQueue((prev) =>
-        prev.map((q) =>
-          q.id === itemId ? { ...q, status: "error", error: msg } : q,
-        ),
-      );
+      updateItem(itemId, { status: "error", error: msg });
     }
   }
 
-  async function startUploadAll() {
+  async function startAll() {
     if (busy) return;
     const todo = queue.filter((q) => q.status === "queued" || q.status === "error");
     if (todo.length === 0) return;
+
     setBusy(true);
     try {
       for (const item of todo) {
         await processOne(item.id);
       }
+      const doneCount = queue.filter((q) => q.status === "done").length + todo.length;
       toast.custom(() => (
-        <div className="surface animate-in fade-in-0 zoom-in-95 px-4 py-3">
+        <div className="surface animate-in fade-in-0 zoom-in-95 rounded-2xl border bg-background px-4 py-3 shadow-lg">
           <div className="flex items-start gap-3">
             <div className="grid size-9 place-items-center rounded-full bg-primary/10 text-primary">
-              <CheckCircle2 className="h-5 w-5" aria-hidden="true" />
+              <CheckCircle2 className="size-5" aria-hidden />
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold tracking-tight">
-                Tải lên thành công
-              </div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                Dữ liệu đã được đồng bộ vào kho và sẵn sàng để duyệt.
-              </div>
+              <p className="text-sm font-semibold">Tải lên thành công</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {doneCount} file đã được đồng bộ vào kho.
+              </p>
               <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
                 <div className="h-full w-full animate-[pmv-progress_900ms_ease-out_forwards] bg-primary" />
               </div>
@@ -226,151 +452,80 @@ export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
     }
   }
 
+  const pendingCount = queue.filter(
+    (q) => q.status === "queued" || q.status === "error",
+  ).length;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button className="rounded-full">
-            <UploadCloud className="mr-2 h-4 w-4" aria-hidden="true" />
+          <Button className="rounded-full gap-2">
+            <UploadCloud className="size-4" aria-hidden />
             Tải lên
           </Button>
         }
       />
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <UploadCloud className="h-4 w-4" aria-hidden="true" />
+
+      <DialogContent className="flex max-h-[90dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <UploadCloud className="size-4" aria-hidden />
             Tải lên Kho
           </DialogTitle>
-          <DialogDescription>
-            Kéo thả file vào đây hoặc chọn từ thiết bị. Hệ thống sẽ tải lên qua
-            Mạng Kho riêng tư và lập chỉ mục để bạn duyệt nhanh.
-          </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
-          <div
-            className="rounded-2xl border bg-card p-4"
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              const files = Array.from(e.dataTransfer.files ?? []).filter(Boolean);
-              if (files.length > 0) addFiles(files);
-            }}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm">
-                <UploadCloud className="h-4 w-4" aria-hidden="true" />
-                <span className="font-medium">Thả file để tải lên</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Label htmlFor="file" className="sr-only">
-                  Chọn file
-                </Label>
-                <Input
-                  id="file"
-                  type="file"
-                  multiple
-                  accept="image/*,video/*"
-                  onChange={(e) => {
-                    const files = Array.from(e.target.files ?? []);
-                    if (files.length > 0) addFiles(files);
-                    e.currentTarget.value = "";
-                  }}
-                />
-              </div>
-            </div>
-            <div className="mt-2 text-xs text-muted-foreground">
-              Hỗ trợ ảnh và video. Theo dõi tiến trình theo từng file.
-            </div>
-          </div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-4 gap-4">
+          {/* Drop zone */}
+          <DropZone onFiles={addFiles} disabled={busy} />
 
-          {queue.length > 0 && (
-            <div className="space-y-3">
-              {queue.slice(0, 6).map((q) => {
-                const icon =
-                  q.kind === "image" ? (
-                    <ImageIcon className="h-4 w-4" aria-hidden="true" />
-                  ) : q.kind === "video" ? (
-                    <FileVideo className="h-4 w-4" aria-hidden="true" />
-                  ) : (
-                    <UploadCloud className="h-4 w-4" aria-hidden="true" />
-                  );
-                return (
-                  <div key={q.id} className="rounded-xl border bg-card p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          {icon}
-                          <div className="truncate text-sm font-medium">{q.file.name}</div>
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {(q.file.size / 1024 / 1024).toFixed(2)} MB ·{" "}
-                          {q.status === "queued"
-                            ? "Đang chờ"
-                            : q.status === "uploading"
-                              ? "Đang tải lên"
-                              : q.status === "syncing"
-                                ? "Đang đồng bộ"
-                                : q.status === "done"
-                                  ? "Hoàn tất"
-                                  : "Lỗi"}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {q.status === "error" && (
-                          <Button
-                            size="icon"
-                            variant="secondary"
-                            className="h-8 w-8 rounded-full"
-                            onClick={() => void processOne(q.id)}
-                            disabled={busy}
-                            aria-label="Thử lại"
-                          >
-                            <RotateCcw className="h-4 w-4" aria-hidden="true" />
-                          </Button>
-                        )}
-                        {q.status === "done" && (
-                          <CheckCircle2
-                            className="h-5 w-5 text-foreground/70"
-                            aria-hidden="true"
-                          />
-                        )}
-                        {q.status === "uploading" || q.status === "syncing" ? (
-                          <Loader2
-                            className="h-4 w-4 animate-spin text-muted-foreground"
-                            aria-hidden="true"
-                          />
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <Progress value={q.progress} />
-                    </div>
-                    {q.status === "error" && q.error && (
-                      <div className="mt-2 flex items-center gap-2 text-xs text-destructive">
-                        <CircleAlert className="h-4 w-4" aria-hidden="true" />
-                        <span className="truncate">{q.error}</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {queue.length > 6 && (
-                <div className="text-center text-xs text-muted-foreground">
-                  +{queue.length - 6} file khác trong hàng chờ…
+          {/* File list */}
+          <AnimatePresence initial={false}>
+            {queue.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="flex flex-col gap-2"
+              >
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    {queue.length} file đã chọn
+                  </p>
+                  {!busy && (
+                    <button
+                      onClick={() => {
+                        queue.forEach((q) => q.preview && URL.revokeObjectURL(q.preview));
+                        setQueue([]);
+                      }}
+                      className="text-xs text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      Xoá tất cả
+                    </button>
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+
+                <ul className="flex flex-col gap-2">
+                  <AnimatePresence initial={false}>
+                    {queue.map((item) => (
+                      <FileRow
+                        key={item.id}
+                        item={item}
+                        onDelete={() => removeItem(item.id)}
+                        onRetry={() => void processOne(item.id)}
+                      />
+                    ))}
+                  </AnimatePresence>
+                </ul>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
-        <DialogFooter className="gap-2 sm:gap-0">
+        {/* Footer */}
+        <div className="shrink-0 border-t px-5 py-3 flex items-center justify-between gap-3">
           <Button
-            variant="secondary"
+            variant="ghost"
             className="rounded-full"
             onClick={() => setOpen(false)}
             disabled={busy}
@@ -379,14 +534,17 @@ export function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
           </Button>
           <Button
             className="rounded-full"
-            onClick={() => void startUploadAll()}
-            disabled={queue.length === 0 || busy}
+            onClick={() => void startAll()}
+            disabled={pendingCount === 0 || busy}
           >
-            {busy ? "Đang tải lên…" : "Tải lên"}
+            {busy
+              ? "Đang tải lên…"
+              : pendingCount > 0
+                ? `Tải lên ${pendingCount} file`
+                : "Tải lên"}
           </Button>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );
 }
-
