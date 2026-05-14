@@ -18,14 +18,16 @@ from app.schemas.media_schema import (
     UploadAuthResponse,
 )
 from app.services.imagekit_service import ImageKitService, get_imagekit_service
-from app.utils.security import AdminPrincipal, get_current_admin
+from app.utils.security import UserPrincipal, get_current_user
 
 
-router = APIRouter(dependencies=[Depends(get_current_admin)])
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.get("/upload-auth", response_model=UploadAuthResponse)
-async def upload_auth(_admin: AdminPrincipal = Depends(get_current_admin), ik: ImageKitService = Depends(get_imagekit_service)) -> Dict[str, Any]:
+async def upload_auth(
+    ik: ImageKitService = Depends(get_imagekit_service),
+) -> Dict[str, Any]:
     return ik.get_upload_params()
 
 
@@ -33,9 +35,10 @@ async def upload_auth(_admin: AdminPrincipal = Depends(get_current_admin), ik: I
 async def sync_media(
     payload: MediaSyncRequest,
     session: AsyncSession = Depends(get_db_session),
-    _admin: AdminPrincipal = Depends(get_current_admin),
+    current_user: UserPrincipal = Depends(get_current_user),
 ) -> MediaCreateResponse:
     media = Media(
+        user_id=current_user.id,
         imagekit_file_id=payload.imagekit_file_id,
         url=str(payload.url),
         file_name=payload.file_name,
@@ -61,20 +64,18 @@ async def list_media(
     file_type: Optional[str] = Query(default=None, min_length=1, max_length=32),
     sort: Literal["created_desc", "created_asc"] = Query(default="created_desc"),
     session: AsyncSession = Depends(get_db_session),
-    _admin: AdminPrincipal = Depends(get_current_admin),
+    current_user: UserPrincipal = Depends(get_current_user),
 ) -> MediaListResponse:
-    filters = []
+    # SECURITY: always scope to the authenticated user's media only
+    filters = [Media.user_id == current_user.id]
+
     if q:
-        q_like = f"%{q.strip()}%"
-        filters.append(Media.file_name.ilike(q_like))
+        filters.append(Media.file_name.ilike(f"%{q.strip()}%"))
     if file_type:
         filters.append(Media.file_type == file_type)
 
-    base = select(Media)
-    count_q = select(func.count(Media.id))
-    if filters:
-        base = base.where(*filters)
-        count_q = count_q.where(*filters)
+    base = select(Media).where(*filters)
+    count_q = select(func.count(Media.id)).where(*filters)
 
     total_items = (await session.execute(count_q)).scalar_one()
     total_pages = max(1, ceil(total_items / limit)) if total_items else 1
@@ -115,18 +116,20 @@ async def delete_media(
     file_id: int,
     session: AsyncSession = Depends(get_db_session),
     ik: ImageKitService = Depends(get_imagekit_service),
-    _admin: AdminPrincipal = Depends(get_current_admin),
+    current_user: UserPrincipal = Depends(get_current_user),
 ) -> Dict[str, str]:
-    media = (await session.execute(select(Media).where(Media.id == file_id))).scalar_one_or_none()
+    # SECURITY: ensure the media belongs to the current user
+    media = (
+        await session.execute(
+            select(Media).where(Media.id == file_id, Media.user_id == current_user.id)
+        )
+    ).scalar_one_or_none()
+
     if media is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
-    # Step 1: Delete from ImageKit (remote)
     await ik.delete_file(imagekit_file_id=media.imagekit_file_id)
-
-    # Step 2: Delete locally
     await session.execute(delete(Media).where(Media.id == file_id))
     await session.commit()
 
-    return {"message": "File deleted from vault and ImageKit successfully"}
-
+    return {"message": "File deleted successfully"}

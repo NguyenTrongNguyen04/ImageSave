@@ -17,8 +17,17 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 @dataclass(frozen=True, slots=True)
-class AdminPrincipal:
+class UserPrincipal:
+    id: int
     username: str
+
+
+# Backwards-compat alias used elsewhere in the codebase
+AdminPrincipal = UserPrincipal
+
+
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
@@ -28,14 +37,18 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(*, subject: str, settings: Settings, expires_delta: Optional[timedelta] = None) -> str:
-    # Keep the token minimal:
-    # - sub: who the token represents (single admin user in this SRS)
-    # - iat/exp: enables expiry checks and future rotation strategies
+def create_access_token(
+    *,
+    subject: str,
+    user_id: int,
+    settings: Settings,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
     now = datetime.now(tz=timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
     payload: Dict[str, Any] = {
         "sub": subject,
+        "user_id": user_id,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -51,16 +64,17 @@ def decode_token(*, token: str, settings: Settings) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from e
 
 
-def get_current_admin(
+def get_current_user(
     token: str = Depends(oauth2_scheme),
     settings: Settings = Depends(get_settings),
-) -> AdminPrincipal:
-    # This vault is intentionally single-user:
-    # - we validate that the JWT subject matches ADMIN_USERNAME
-    # - no user table lookup required (keeps the system simple for a personal vault)
+) -> UserPrincipal:
     payload = decode_token(token=token, settings=settings)
     username = payload.get("sub")
-    if not isinstance(username, str) or username != settings.admin_username:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
-    return AdminPrincipal(username=username)
+    user_id = payload.get("user_id")
+    if not isinstance(username, str) or not isinstance(user_id, int):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    return UserPrincipal(id=user_id, username=username)
 
+
+# Keep old name working
+get_current_admin = get_current_user

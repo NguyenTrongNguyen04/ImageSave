@@ -3,12 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, EmailStr, Field, HttpUrl
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=256)
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=128, pattern=r"^[a-zA-Z0-9_]+$")
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=256)
 
 
 class TokenResponse(BaseModel):
@@ -50,4 +56,3 @@ class MediaListResponse(BaseModel):
     total_items: int
     total_pages: int
     current_page: int
-
