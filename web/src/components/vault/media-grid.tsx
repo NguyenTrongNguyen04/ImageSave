@@ -201,10 +201,12 @@ export function MediaGrid() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
         {items.map((m) => (
           <Card key={m.id} className="group overflow-hidden lift">
-            <button
-              type="button"
-              className="relative aspect-square bg-muted text-left"
+            <div
+              role="button"
+              tabIndex={0}
+              className="relative aspect-square cursor-pointer bg-muted"
               onClick={() => setViewer({ open: true, index: items.findIndex((x) => x.id === m.id) })}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setViewer({ open: true, index: items.findIndex((x) => x.id === m.id) }); }}
             >
               {m.file_type === "video" ? (
                 <>
@@ -258,7 +260,7 @@ export function MediaGrid() {
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-            </button>
+            </div>
             <div className="space-y-1.5 p-3">
               <div className="truncate text-sm font-medium">{m.file_name}</div>
               <div className="text-xs text-muted-foreground">
